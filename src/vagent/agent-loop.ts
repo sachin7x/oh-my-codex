@@ -1,5 +1,5 @@
+import type { EvidenceEvent, TaskSpec, VerificationResult } from './types.js';
 import type { EvidenceLedger } from './evidence.js';
-import type { TaskSpec, VerificationResult } from './types.js';
 
 export interface AgentAction {
   readonly kind: 'tool' | 'finish' | 'replan';
@@ -12,7 +12,7 @@ export interface AgentModel {
   nextAction(input: {
     task: TaskSpec;
     context: readonly string[];
-    evidence: readonly ReturnType<EvidenceLedger['all']> extends infer T ? T[] : never;
+    evidence: readonly EvidenceEvent[];
   }): Promise<AgentAction>;
 }
 
@@ -72,16 +72,16 @@ export class AgentLoop {
         const tool = this.tools.get(action.tool);
         if (!tool) {
           context.push(`Tool unavailable: ${action.tool}`);
-          continue;
+        } else {
+          const result = await tool.run(action.input ?? {});
+          context.push(result.output);
+          this.ledger.record({
+            type: 'execute',
+            action: `tool:${action.tool}`,
+            stdout: result.output,
+            metadata: result.metadata,
+          });
         }
-        const result = await tool.run(action.input ?? {});
-        context.push(result.output);
-        this.ledger.record({
-          type: 'execute',
-          action: `tool:${action.tool}`,
-          stdout: result.output,
-          metadata: result.metadata,
-        });
       }
 
       if (step % this.policy.verify_every === 0) {
