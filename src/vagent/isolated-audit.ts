@@ -1,10 +1,11 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, normalize } from 'node:path';
+import { isAbsolute, join, normalize, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
   DEFAULT_VERIFIER_CONTRACT,
+  isCandidatePathAllowed,
   validateContract,
   type AuditCase,
   type AuditResult,
@@ -26,10 +27,6 @@ export interface AuditWorker {
   run(workspace: string, requests: readonly WorkerRequest[], policy: IsolationPolicy): Promise<WorkerResponse[]>;
 }
 
-function isDenied(path: string, denied: readonly string[]): boolean {
-  return denied.some(prefix => path === prefix || path.startsWith(prefix));
-}
-
 function safeRelativePath(path: string): string {
   const normalized = normalize(path);
   if (isAbsolute(path) || normalized === '..' || normalized.startsWith('../')) {
@@ -38,23 +35,32 @@ function safeRelativePath(path: string): string {
   return normalized;
 }
 
+async function writeWorkspaceFile(workspace: string, path: string, content: string): Promise<void> {
+  const target = join(workspace, path);
+  await mkdir(dirname(target), { recursive: true });
+  await writeFile(target, content, 'utf8');
+}
+
 async function materializeWorkspace(
   candidate: CandidateFileSet,
   contract: VerifierContract,
 ): Promise<string> {
   const workspace = await mkdtemp(join(tmpdir(), 'vagent-audit-'));
-  const files = { ...candidate.base_files, ...candidate.submitted_files };
 
-  for (const [rawPath, content] of Object.entries(files)) {
+  for (const [rawPath, content] of Object.entries(candidate.base_files)) {
     const path = safeRelativePath(rawPath);
-    if (isDenied(path, contract.candidate_denied_prefixes)) continue;
-    const target = join(workspace, path);
-    await writeFile(target, content, { encoding: 'utf8', flag: 'w' }).catch(async error => {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      await import('node:fs/promises').then(fs => fs.mkdir(dirname(target), { recursive: true }));
-      await writeFile(target, content, 'utf8');
-    });
+    if (contract.candidate_denied_prefixes.some(prefix => path === prefix || path.startsWith(prefix))) {
+      continue;
+    }
+    await writeWorkspaceFile(workspace, path, content);
   }
+
+  for (const [rawPath, content] of Object.entries(candidate.submitted_files)) {
+    const path = safeRelativePath(rawPath);
+    if (!isCandidatePathAllowed(path, contract)) continue;
+    await writeWorkspaceFile(workspace, path, content);
+  }
+
   return workspace;
 }
 
@@ -114,7 +120,12 @@ export class ProcessAuditWorker implements AuditWorker {
             reject(new Error('Audit protocol violation; verdict is UNKNOWN.'));
             return;
           }
-          responses.push(JSON.parse(line.slice(nonce.length)) as WorkerResponse);
+          try {
+            responses.push(JSON.parse(line.slice(nonce.length)) as WorkerResponse);
+          } catch {
+            reject(new Error('Audit protocol JSON violation; verdict is UNKNOWN.'));
+            return;
+          }
         }
         if (responses.length !== requests.length) {
           reject(new Error('Audit worker returned an incomplete response set.'));
