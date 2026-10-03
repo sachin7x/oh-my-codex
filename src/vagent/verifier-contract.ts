@@ -92,3 +92,12 @@ export const DEFAULT_VERIFIER_CONTRACT: VerifierContract = {
   },
   fail_closed: true,
 };
+
+export function isCandidatePathAllowed(path: string, contract: VerifierContract): boolean {
+  if (contract.candidate_denied_prefixes.some(prefix => path === prefix || path.startsWith(prefix))) {
+    return false;
+  }
+  return contract.candidate_allowed_prefixes.some(prefix =>
+    path === prefix || path.startsWith(prefix),
+  );
+}
