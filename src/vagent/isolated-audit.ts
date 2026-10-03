@@ -20,6 +20,7 @@ export interface ProcessAuditWorkerPolicy {
   readonly command: readonly string[];
   readonly timeout_ms?: number;
   readonly use_namespaces?: boolean;
+  readonly private_tmp?: boolean;
   readonly env?: Readonly<Record<string, string>>;
 }
 
@@ -33,6 +34,10 @@ function safeRelativePath(path: string): string {
     throw new Error(`Unsafe candidate path: ${path}`);
   }
   return normalized;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 async function writeWorkspaceFile(workspace: string, path: string, content: string): Promise<void> {
@@ -71,9 +76,17 @@ export class ProcessAuditWorker implements AuditWorker {
     const timeout = this.worker.timeout_ms ?? policy.timeout_ms;
     const nonce = randomUUID();
     const baseEnv = this.worker.env ?? { PATH: '/usr/bin:/bin' };
-    const command = this.worker.use_namespaces
-      ? ['unshare', '-Urmn', '--', ...this.worker.command]
-      : [...this.worker.command];
+
+    let command: string[];
+    if (this.worker.use_namespaces) {
+      const workerCommand = this.worker.command.map(shellQuote).join(' ');
+      const namespaceScript = this.worker.private_tmp === true && policy.private_tmp
+        ? `mount -t tmpfs tmpfs /tmp && exec ${workerCommand}`
+        : `exec ${workerCommand}`;
+      command = ['unshare', '-Urmn', '--', 'sh', '-c', namespaceScript];
+    } else {
+      command = [...this.worker.command];
+    }
 
     return new Promise((resolve, reject) => {
       const child = spawn(command[0], command.slice(1), {
